@@ -70,15 +70,21 @@ pub fn destination_caller(env: &Env, domain: u32) -> BytesN<32> {
 }
 
 pub fn set_link(env: &Env, chain: &String, domain: u32, caller: &BytesN<32>) {
+    let domain_key = DataKey::Domain(chain.clone());
+    let chain_key = DataKey::Chain(domain);
+    let caller_key = DataKey::Caller(domain);
+    env.storage().persistent().set(&domain_key, &domain);
+    env.storage().persistent().set(&chain_key, chain);
+    env.storage().persistent().set(&caller_key, caller);
     env.storage()
         .persistent()
-        .set(&DataKey::Domain(chain.clone()), &domain);
+        .extend_ttl(&domain_key, BUMP_THRESHOLD, BUMP_TO);
     env.storage()
         .persistent()
-        .set(&DataKey::Chain(domain), chain);
+        .extend_ttl(&chain_key, BUMP_THRESHOLD, BUMP_TO);
     env.storage()
         .persistent()
-        .set(&DataKey::Caller(domain), caller);
+        .extend_ttl(&caller_key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn asset(env: &Env, domain: u32, burn_token: &BytesN<32>) -> Option<Address> {
@@ -93,9 +99,22 @@ pub fn asset(env: &Env, domain: u32, burn_token: &BytesN<32>) -> Option<Address>
 }
 
 pub fn set_asset(env: &Env, domain: u32, burn_token: &BytesN<32>, local: &Address) {
+    let key = DataKey::Asset(domain, burn_token.clone());
+    env.storage().persistent().set(&key, local);
     env.storage()
         .persistent()
-        .set(&DataKey::Asset(domain, burn_token.clone()), local);
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+fn touch_key(env: &Env, key: &DataKey) -> bool {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
 }
 
 /// Top a link's lifetime back up without changing it.
@@ -103,12 +122,42 @@ pub fn set_asset(env: &Env, domain: u32, burn_token: &BytesN<32>, local: &Addres
 /// Soroban archives storage nobody reads, and a lane that stays quiet for a month is exactly the
 /// lane somebody will try to use on the day it has expired. The read paths above bump as they go,
 /// so this only matters for a lane with no traffic at all, which is why it is permissionless.
-pub fn touch_link(env: &Env, domain: u32) {
-    for key in [DataKey::Chain(domain), DataKey::Caller(domain)] {
-        if env.storage().persistent().has(&key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+pub fn touch_link(env: &Env, domain: u32) -> u32 {
+    let mut touched = 0u32;
+    let chain_key = DataKey::Chain(domain);
+    if let Some(chain) = env.storage().persistent().get::<_, String>(&chain_key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&chain_key, BUMP_THRESHOLD, BUMP_TO);
+        touched += 1;
+        if touch_key(env, &DataKey::Domain(chain)) {
+            touched += 1;
         }
     }
+    if touch_key(env, &DataKey::Caller(domain)) {
+        touched += 1;
+    }
+    touched
+}
+
+pub fn touch_link_by_chain(env: &Env, chain: &String) -> u32 {
+    let domain_key = DataKey::Domain(chain.clone());
+    let Some(domain) = env.storage().persistent().get::<_, u32>(&domain_key) else {
+        return 0;
+    };
+    env.storage()
+        .persistent()
+        .extend_ttl(&domain_key, BUMP_THRESHOLD, BUMP_TO);
+    let mut touched = 1u32;
+    if touch_key(env, &DataKey::Chain(domain)) {
+        touched += 1;
+    }
+    if touch_key(env, &DataKey::Caller(domain)) {
+        touched += 1;
+    }
+    touched
+}
+
+pub fn touch_asset(env: &Env, domain: u32, burn_token: &BytesN<32>) -> bool {
+    touch_key(env, &DataKey::Asset(domain, burn_token.clone()))
 }

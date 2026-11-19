@@ -39,9 +39,11 @@ import {
     ZeroAddress
 } from "./HyperionErrors.sol";
 import {
+    ActionAuditStatus,
     ActionKind,
     AddressKind,
     AdminAction,
+    CancelReason,
     Destination,
     Origin,
     OutboundRequest,
@@ -99,6 +101,9 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @dev A change approved in March and executed in November is a change nobody reviewed.
     uint64 public constant GRACE_PERIOD = 7 days;
 
+    /// @notice Maximum length in bytes of a timelock cancellation reason note.
+    uint256 public constant MAX_REASON_LEN = 128;
+
     /// @notice The shortest flow window a limit can be measured over, in seconds.
     uint64 public constant MIN_FLOW_WINDOW = 5 minutes;
 
@@ -155,6 +160,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
 
     mapping(uint64 claimId => PendingClaim claim) private _claims;
     mapping(uint64 actionId => QueuedAction queued) private _actions;
+    mapping(uint64 actionId => bool cancelled) private _cancelledActions;
 
     /// @param admin Holds every privileged power, all of them behind the timelock.
     /// @notice Wires up the router with its roles, its treasury, and its fee and timing limits.
@@ -602,12 +608,13 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             executed: false
         });
         emit ActionQueued(id, action.kind, eta, expiresAt);
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Queued, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
     function executeAction(uint64 id) external override onlyRole(DEFAULT_ADMIN_ROLE) {
         QueuedAction storage queued = _actions[id];
-        if (queued.id == 0) revert TimelockNotQueued();
+        if (queued.id == 0 || _cancelledActions[id]) revert TimelockNotQueued();
         if (queued.executed) revert TimelockAlreadyExecuted();
         if (block.timestamp < queued.eta) revert TimelockNotReady(queued.eta);
         if (block.timestamp > queued.expiresAt) revert TimelockExpired(queued.expiresAt);
@@ -620,20 +627,37 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         _validateAction(action);
         _applyAction(action);
         emit ActionExecuted(id, action.kind);
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Executed, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
     /// @dev Guardian can cancel as well as admin. Somebody who can only stop things should be
     /// able to stop a queued change they think is a mistake.
     function cancelAction(uint64 id) external override {
+        _cancelAction(id, CancelReason.Unspecified, "");
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function cancelActionWithReason(uint64 id, CancelReason reason, string calldata note) external override {
+        _cancelAction(id, reason, note);
+    }
+
+    function _cancelAction(uint64 id, CancelReason reason, string memory note) private {
         if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
             revert Unauthorized();
         }
+        bytes memory raw = bytes(note);
+        if (raw.length > MAX_REASON_LEN) revert InvalidLimit();
+        for (uint256 i; i < raw.length; ++i) {
+            if (uint8(raw[i]) < 32 || uint8(raw[i]) > 126) revert InvalidLimit();
+        }
         QueuedAction storage queued = _actions[id];
-        if (queued.id == 0) revert TimelockNotQueued();
+        if (queued.id == 0 || _cancelledActions[id]) revert TimelockNotQueued();
         if (queued.executed) revert TimelockAlreadyExecuted();
-        delete _actions[id];
+        _cancelledActions[id] = true;
+        // Retain the canonical payload and schedule. The audit status blocks execution forever.
         emit ActionCancelled(id, msg.sender);
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Cancelled, msg.sender, reason, note);
     }
 
     /// @notice Role changes go through the timelock like everything else.
@@ -655,6 +679,11 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @inheritdoc IHyperionRouter
     function queuedAction(uint64 id) external view override returns (QueuedAction memory) {
         return _actions[id];
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function actionCancelled(uint64 id) external view override returns (bool) {
+        return _cancelledActions[id];
     }
 
     /// @inheritdoc IHyperionRouter

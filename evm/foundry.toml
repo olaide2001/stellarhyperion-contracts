@@ -23,10 +23,9 @@ evm_version = "cancun"
 via_ir = true
 
 optimizer = true
-# Every function here runs far more often than it is deployed, and the router is nowhere near
-# the size limit, so the runs number is set for calldata and execution cost rather than for
-# bytecode size.
-optimizer_runs = 20000
+# Governance observability adds code to the router. Keep a uniform build profile with enough
+# EIP-170 deployment headroom; gas reports and the full CI fuzzer still measure this exact build.
+optimizer_runs = 1000
 
 # Warnings are the only way the compiler tells you about a shadowed name or an unreachable
 # branch, and a warning nobody has to clear is a warning everybody scrolls past.

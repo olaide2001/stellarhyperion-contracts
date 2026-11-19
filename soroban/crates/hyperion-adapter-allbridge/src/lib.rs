@@ -64,11 +64,12 @@ use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm},
     codec,
     inbound::{Origin, Recipient, RouterClient},
-    HyperionError, RouteKind,
+    AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, MAX_MAINTENANCE_BATCH,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, U256,
+    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
+    U256,
 };
 
 use rail::{AllbridgeBridgeClient, AllbridgeMessengerClient, STELLAR_CHAIN_ID};
@@ -494,8 +495,89 @@ impl AllbridgeAdapter {
         env.storage()
             .instance()
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
-        storage::touch_lane(&env, &chain);
+        let _ = storage::touch_lane(&env, &chain);
         Ok(())
+    }
+
+    /// Bounded storage maintenance for Allbridge peer trust (`Lane`, `Chain`), token mappings
+    /// (`Asset`), and inbound replay records (`Processed`).
+    pub fn maintain_storage(
+        env: Env,
+        tokens: Vec<Address>,
+        peer_chains: Vec<String>,
+        peer_domains: Vec<u32>,
+        remote_tokens: Vec<BytesN<32>>,
+        inbound_messages: Vec<BytesN<32>>,
+    ) -> Result<MaintenanceSummary, HyperionError> {
+        let _ = storage::config(&env)?;
+        if tokens.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains.len() > MAX_MAINTENANCE_BATCH
+            || peer_domains.len() > MAX_MAINTENANCE_BATCH
+            || remote_tokens.len() > MAX_MAINTENANCE_BATCH
+            || inbound_messages.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_mul(2)
+                .saturating_add(peer_domains.len())
+                .saturating_add(tokens.len().saturating_mul(peer_domains.len()))
+                .saturating_add(inbound_messages.len())
+                > MAX_MAINTENANCE_BATCH
+            || !remote_tokens.is_empty()
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+
+        let mut peer_trust_touched = 0u32;
+        for chain in peer_chains.iter() {
+            peer_trust_touched += storage::touch_lane(&env, &chain);
+        }
+        for chain_id in peer_domains.iter() {
+            if storage::touch_chain_id(&env, chain_id) {
+                peer_trust_touched += 1;
+            }
+        }
+
+        let mut token_mappings_touched = 0u32;
+        for token in tokens.iter() {
+            for chain_id in peer_domains.iter() {
+                if storage::touch_asset(&env, &token, chain_id) {
+                    token_mappings_touched += 1;
+                }
+            }
+        }
+
+        let mut inbound_records_touched = 0u32;
+        for message_id in inbound_messages.iter() {
+            if storage::touch_processed(&env, &message_id) {
+                inbound_records_touched += 1;
+            }
+        }
+
+        Ok(MaintenanceSummary {
+            instance_extended: true,
+            token_mappings_touched,
+            peer_trust_touched,
+            inbound_records_touched,
+            total_keys_touched: peer_trust_touched
+                + token_mappings_touched
+                + inbound_records_touched,
+        })
+    }
+
+    /// Explicit key coverage for Allbridge adapter storage maintenance.
+    pub fn key_coverage(_env: Env) -> Result<AdapterKeyCoverage, HyperionError> {
+        Ok(AdapterKeyCoverage {
+            route: RouteKind::Allbridge,
+            has_token_mappings: true,
+            has_peer_trust: true,
+            has_inbound_records: true,
+            token_mapping_keys: 1,
+            peer_trust_keys: 2,
+            inbound_record_keys: 1,
+        })
     }
 
     // ---------------------------------------------------------------------------------------

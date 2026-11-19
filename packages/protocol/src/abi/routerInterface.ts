@@ -8,6 +8,25 @@
 export const hyperionRouterInterfaceAbi = [
   {
     "type": "function",
+    "name": "actionCancelled",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "adapter",
     "inputs": [
       {
@@ -157,6 +176,29 @@ export const hyperionRouterInterfaceAbi = [
         "name": "id",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cancelActionWithReason",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "reason",
+        "type": "uint8",
+        "internalType": "enum CancelReason"
+      },
+      {
+        "name": "note",
+        "type": "string",
+        "internalType": "string"
       }
     ],
     "outputs": [],
@@ -706,6 +748,49 @@ export const hyperionRouterInterfaceAbi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "ActionAuditUpdated",
+    "inputs": [
+      {
+        "name": "version",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
+      },
+      {
+        "name": "id",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "status",
+        "type": "uint8",
+        "indexed": true,
+        "internalType": "enum ActionAuditStatus"
+      },
+      {
+        "name": "actor",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "cancelReason",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "enum CancelReason"
+      },
+      {
+        "name": "reasonNote",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
   },
   {
     "type": "event",

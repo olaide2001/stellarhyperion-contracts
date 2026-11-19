@@ -1,12 +1,24 @@
 use hyperion_core::RouteKind;
 use soroban_sdk::{contracttype, Address, BytesN, String};
 
+pub use hyperion_core::MAX_MAINTENANCE_BATCH;
+
+/// Maximum length in bytes of a timelock cancellation reason note.
+pub const MAX_REASON_LEN: u32 = 128;
+
+/// Implicit schema version for already-initialized deployments that predate `DataKey::SchemaVersion`.
+pub const LEGACY_SCHEMA_VERSION: u32 = 1;
+
+/// Current Soroban storage schema version for `HyperionRouter`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
 /// Everything the router needs to know about itself.
-///
-/// Two roles, not one. `admin` is the multisig that changes parameters and has to wait out a
-/// timelock to do it. `guardian` can only ever make things safer: pause, cancel a queued
-/// action, lower a flow limit. Splitting them means the key that can stop an incident is not
-/// the same key that can quietly raise a fee, and neither one alone can do both.
+// Everything the router needs to know about itself.
+//
+// Two roles, not one. `admin` is the multisig that changes parameters and has to wait out a
+// timelock to do it. `guardian` can only ever make things safer: pause, cancel a queued
+// action, lower a flow limit. Splitting them means the key that can stop an incident is not
+// the same key that can quietly raise a fee, and neither one alone can do both.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -23,11 +35,12 @@ pub struct Config {
 }
 
 /// Per-asset settings.
-///
-/// A token has to be registered before it can move, and registration carries a flow limit.
-/// There is no implicit unlimited default anywhere in this contract: an unregistered token is
-/// a refused transfer, which is the behaviour you want on the day someone adds a lane and
-/// forgets the limit.
+// Per-asset settings.
+//
+// A token has to be registered before it can move, and registration carries a flow limit.
+// There is no implicit unlimited default anywhere in this contract: an unregistered token is
+// a refused transfer, which is the behaviour you want on the day someone adds a lane and
+// forgets the limit.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenConfig {
@@ -39,8 +52,9 @@ pub struct TokenConfig {
 }
 
 /// Per-route settings.
-///
-/// Limits that apply to an entire route rather than to a single asset.
+// Per-route settings.
+//
+// Limits that apply to an entire route rather than to a single asset.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteConfig {
@@ -70,13 +84,14 @@ pub struct TransferRecord {
 }
 
 /// An inbound delivery that could not be handed over on the spot.
-///
-/// A classic Stellar account cannot hold an asset it has not opened a trustline for, and a
-/// transfer into one that has not is simply refused. Reverting here would mean the burn on the
-/// far side already happened and the funds are stranded, so the router keeps them and records
-/// who they belong to. Settling is permissionless: the funds can only ever go to the recipient
-/// written down at delivery time, so there is no reason to make them pay their own gas or wait
-/// for us.
+// An inbound delivery that could not be handed over on the spot.
+//
+// A classic Stellar account cannot hold an asset it has not opened a trustline for, and a
+// transfer into one that has not is simply refused. Reverting here would mean the burn on the
+// far side already happened and the funds are stranded, so the router keeps them and records
+// who they belong to. Settling is permissionless: the funds can only ever go to the recipient
+// written down at delivery time, so there is no reason to make them pay their own gas or wait
+// for us.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingClaim {
@@ -91,8 +106,9 @@ pub struct PendingClaim {
     pub settled: bool,
 }
 
-/// Read-only accounting for parked claims in one token. `known` is false whenever the
-/// token's balance cannot be read; callers must not treat that state as solvent.
+/// Read-only accounting for parked claims in one token.
+// Read-only accounting for parked claims in one token. `known` is false whenever the
+// token's balance cannot be read; callers must not treat that state as solvent.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimLiability {
@@ -113,8 +129,9 @@ pub enum RecipientEligibility {
     Unknown,
 }
 
-/// Full inbound provenance attached to new claims. Older claims intentionally have no entry;
-/// their original claim record remains readable and settleable.
+/// Full inbound provenance attached to new claims.
+// Full inbound provenance attached to new claims. Older claims intentionally have no entry;
+// their original claim record remains readable and settleable.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimProvenance {
@@ -139,16 +156,17 @@ pub struct InboundRecord {
 }
 
 /// A parameter change waiting out its delay.
-///
-/// Anything that can move value or widen risk goes through here. Anything that only ever
-/// reduces risk does not, because a bridge that needs three days of notice to stop bleeding is
-/// not actually pausable.
-///
-/// These variant names and their integer widths are the proposal wire format. The read-only
-/// `script/stellar/propose.sh` command emits exactly these variants as JSON for an operator to
-/// review; it never signs or submits them. Adding or renaming a variant means updating that tool
-/// and the protocol parity tests in the same change, or a reviewer will be shown an action the
-/// router cannot accept.
+// A parameter change waiting out its delay.
+//
+// Anything that can move value or widen risk goes through here. Anything that only ever
+// reduces risk does not, because a bridge that needs three days of notice to stop bleeding is
+// not actually pausable.
+//
+// These variant names and their integer widths are the proposal wire format. The read-only
+// `script/stellar/propose.sh` command emits exactly these variants as JSON for an operator to
+// review; it never signs or submits them. Adding or renaming a variant means updating that tool
+// and the protocol parity tests in the same change, or a reviewer will be shown an action the
+// router cannot accept.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdminAction {
@@ -167,6 +185,8 @@ pub enum AdminAction {
     Upgrade(BytesN<32>),
     SetRouteConfig(RouteKind, RouteConfig),
     SetRouteMaxSingleTransfer(RouteKind, i128),
+    /// Authorize a fixed, bounded migration only after the ordinary review delay.
+    BeginStorageMigration(u32),
 }
 
 #[contracttype]
@@ -182,9 +202,10 @@ pub struct QueuedAction {
 }
 
 /// What a caller is told about a route before committing to it.
-///
-/// The app shows all four of these side by side, including the ones it is not going to use,
-/// which is the whole reason the router exposes it rather than keeping the arithmetic private.
+// What a caller is told about a route before committing to it.
+//
+// The app shows all four of these side by side, including the ones it is not going to use,
+// which is the whole reason the router exposes it rather than keeping the arithmetic private.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteQuote {
@@ -204,10 +225,11 @@ pub struct RouteQuote {
 }
 
 /// Everything about an outbound transfer except who is sending it.
-///
-/// Bundled rather than passed loose because eight positional arguments is exactly how a caller
-/// ends up swapping `amount` and `min_destination_amount`, and because the generated TypeScript
-/// binding reads as a named object this way instead of a line of anonymous numbers.
+// Everything about an outbound transfer except who is sending it.
+//
+// Bundled rather than passed loose because eight positional arguments is exactly how a caller
+// ends up swapping `amount` and `min_destination_amount`, and because the generated TypeScript
+// binding reads as a named object this way instead of a line of anonymous numbers.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundRequest {
@@ -217,8 +239,9 @@ pub struct OutboundRequest {
     pub destination: Destination,
     /// Decimals the asset uses on the far side. Six for USDC on every EVM chain here.
     pub destination_decimals: u32,
-    /// Floor on what the recipient must end up with, in the destination base. Zero accepts
-    /// whatever the rate gives.
+    /// Floor on what the recipient must end up with, in the destination base.
+    // Floor on what the recipient must end up with, in the destination base. Zero accepts
+    // whatever the rate gives.
     pub min_destination_amount: i128,
 }
 
@@ -227,9 +250,10 @@ pub struct OutboundRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Destination {
     pub chain: String,
-    /// Left-padded 20 byte EVM address. The router validates the padding rather than
-    /// truncating, because a Stellar key that ends up in this field looks perfectly valid
-    /// once you chop the front off it.
+    /// Left-padded 20 byte EVM address.
+    // Left-padded 20 byte EVM address. The router validates the padding rather than
+    // truncating, because a Stellar key that ends up in this field looks perfectly valid
+    // once you chop the front off it.
     pub address: BytesN<32>,
 }
 
@@ -238,3 +262,39 @@ pub struct Destination {
 // router's own entry points into its WASM. They are re-exported so the router's public surface
 // reads exactly as it did when they were declared in this file.
 pub use hyperion_core::inbound::{Origin, Recipient};
+
+/// Structured reason code when a queued timelock action is cancelled.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CancelReason {
+    Unspecified = 0,
+    Superseded = 1,
+    ParametersIncorrect = 2,
+    SecurityConcern = 3,
+    Expired = 4,
+    OperatorAborted = 5,
+}
+
+/// Lifecycle state of a timelock action in its audit record.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ActionAuditStatus {
+    Queued = 0,
+    Executed = 1,
+    Cancelled = 2,
+}
+
+/// Progress and schema version status for bounded router storage migrations (#46).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationStatus {
+    pub current_version: u32,
+    pub target_version: u32,
+    pub migration_pending: bool,
+    pub migrated_transfers: u64,
+    pub migrated_claims: u64,
+    pub total_transfers: u64,
+    pub total_claims: u64,
+}

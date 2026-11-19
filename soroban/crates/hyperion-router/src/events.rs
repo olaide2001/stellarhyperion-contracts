@@ -2,16 +2,18 @@ use hyperion_core::RouteKind;
 use soroban_sdk::{contractevent, Address, Env};
 
 use crate::types::{
-    AdminAction, Config, InboundRecord, PendingClaim, QueuedAction, TokenConfig, TransferRecord,
+    ActionAuditStatus, AdminAction, CancelReason, Config, InboundRecord, MigrationStatus,
+    PendingClaim, QueuedAction, TokenConfig, TransferRecord,
 };
 
 /// Every state change the router makes is announced here.
-///
-/// The indexer reads these to answer "where is my transfer", and the monitoring job watches the
-/// privileged ones so a parameter change outside a known maintenance window gets somebody's
-/// attention. Each event carries a `hyperion` topic first so a subscriber can filter server side
-/// instead of pulling the whole ledger and sorting it out afterwards, and each is part of the
-/// contract spec so the TypeScript side reads these as real types rather than loose maps.
+// Every state change the router makes is announced here.
+//
+// The indexer reads these to answer "where is my transfer", and the monitoring job watches the
+// privileged ones so a parameter change outside a known maintenance window gets somebody's
+// attention. Each event carries a `hyperion` topic first so a subscriber can filter server side
+// instead of pulling the whole ledger and sorting it out afterwards, and each is part of the
+// contract spec so the TypeScript side reads these as real types rather than loose maps.
 
 #[contractevent(topics = ["hyperion", "out"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,6 +90,30 @@ pub struct ActionCancelled {
     pub id: u64,
 }
 
+/// Stable action lifecycle audit event emitted on queue, execution, and cancellation (#44).
+#[contractevent(topics = ["hyperion", "audit"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionAuditRecorded {
+    #[topic]
+    pub id: u64,
+    pub version: u32,
+    pub status: ActionAuditStatus,
+    /// Actor for this lifecycle transition; legacy queuing authors are never invented.
+    pub actor: Address,
+    pub reason: CancelReason,
+    pub note: soroban_sdk::String,
+}
+
+/// Emitted when bounded storage migration advances or completes (#46).
+#[contractevent(topics = ["hyperion", "migrated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorageMigrated {
+    pub version: u32,
+    #[topic]
+    pub by: Address,
+    pub status: MigrationStatus,
+}
+
 #[contractevent(topics = ["hyperion", "config"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigChanged {
@@ -110,8 +136,9 @@ pub struct RouteConfigured {
     pub enabled: bool,
 }
 
-/// Emitted when a limit is tightened without waiting out the timelock, which is allowed
-/// precisely because it only ever narrows what the bridge will do.
+/// Emitted when a limit is tightened without waiting out the timelock, which is allowed precisely because it only ever narrows what the bridge will do.
+// Emitted when a limit is tightened without waiting out the timelock, which is allowed
+// precisely because it only ever narrows what the bridge will do.
 #[contractevent(topics = ["hyperion", "flow"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlowLimitLowered {
@@ -189,6 +216,34 @@ pub fn action_executed(env: &Env, action: &QueuedAction) {
 
 pub fn action_cancelled(env: &Env, id: u64, by: &Address) {
     ActionCancelled { by: by.clone(), id }.publish(env);
+}
+
+pub fn action_audit(
+    env: &Env,
+    id: u64,
+    status: ActionAuditStatus,
+    actor: &Address,
+    reason: CancelReason,
+    note: soroban_sdk::String,
+) {
+    ActionAuditRecorded {
+        id,
+        version: 1,
+        status,
+        actor: actor.clone(),
+        reason,
+        note,
+    }
+    .publish(env);
+}
+
+pub fn storage_migrated(env: &Env, by: &Address, status: &MigrationStatus) {
+    StorageMigrated {
+        version: 1,
+        by: by.clone(),
+        status: status.clone(),
+    }
+    .publish(env);
 }
 
 pub fn config_changed(env: &Env, cfg: &Config) {

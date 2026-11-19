@@ -64,12 +64,16 @@ pub fn chain_of(env: &Env, axelar_chain: &String) -> Option<String> {
 }
 
 pub fn set_link(env: &Env, link: &ChainLink) {
+    let link_key = DataKey::Link(link.chain.clone());
+    let source_key = DataKey::Source(link.axelar_chain.clone());
+    env.storage().persistent().set(&link_key, link);
+    env.storage().persistent().set(&source_key, &link.chain);
     env.storage()
         .persistent()
-        .set(&DataKey::Link(link.chain.clone()), link);
+        .extend_ttl(&link_key, BUMP_THRESHOLD, BUMP_TO);
     env.storage()
         .persistent()
-        .set(&DataKey::Source(link.axelar_chain.clone()), &link.chain);
+        .extend_ttl(&source_key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn token_id(env: &Env, token: &Address) -> Option<BytesN<32>> {
@@ -95,12 +99,16 @@ pub fn token_of(env: &Env, token_id: &BytesN<32>) -> Option<Address> {
 }
 
 pub fn set_token(env: &Env, token: &Address, token_id: &BytesN<32>) {
+    let id_key = DataKey::TokenId(token.clone());
+    let tok_key = DataKey::Token(token_id.clone());
+    env.storage().persistent().set(&id_key, token_id);
+    env.storage().persistent().set(&tok_key, token);
     env.storage()
         .persistent()
-        .set(&DataKey::TokenId(token.clone()), token_id);
+        .extend_ttl(&id_key, BUMP_THRESHOLD, BUMP_TO);
     env.storage()
         .persistent()
-        .set(&DataKey::Token(token_id.clone()), token);
+        .extend_ttl(&tok_key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 /// Top a lane's lifetime back up without changing it.
@@ -108,18 +116,59 @@ pub fn set_token(env: &Env, token: &Address, token_id: &BytesN<32>) {
 /// Soroban archives storage nobody reads, and a lane that stays quiet for a month is exactly the
 /// lane somebody will try to use on the day it has expired. The read paths above bump as they go,
 /// so this only matters for a lane with no traffic at all, which is why it is permissionless.
-pub fn touch_link(env: &Env, chain: &String) {
+pub fn touch_link(env: &Env, chain: &String) -> u32 {
     let key = DataKey::Link(chain.clone());
     let Some(found) = env.storage().persistent().get::<_, ChainLink>(&key) else {
-        return;
+        return 0;
     };
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    let mut touched = 1u32;
     let source = DataKey::Source(found.axelar_chain);
     if env.storage().persistent().has(&source) {
         env.storage()
             .persistent()
             .extend_ttl(&source, BUMP_THRESHOLD, BUMP_TO);
+        touched += 1;
     }
+    touched
+}
+
+pub fn touch_token(env: &Env, token: &Address) -> u32 {
+    let key = DataKey::TokenId(token.clone());
+    let Some(id) = env.storage().persistent().get::<_, BytesN<32>>(&key) else {
+        return 0;
+    };
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    let mut touched = 1u32;
+    let rev = DataKey::Token(id);
+    if env.storage().persistent().has(&rev) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&rev, BUMP_THRESHOLD, BUMP_TO);
+        touched += 1;
+    }
+    touched
+}
+
+pub fn touch_remote_token(env: &Env, token_id: &BytesN<32>) -> u32 {
+    let key = DataKey::Token(token_id.clone());
+    let Some(token) = env.storage().persistent().get::<_, Address>(&key) else {
+        return 0;
+    };
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    let mut touched = 1u32;
+    let fwd = DataKey::TokenId(token);
+    if env.storage().persistent().has(&fwd) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&fwd, BUMP_THRESHOLD, BUMP_TO);
+        touched += 1;
+    }
+    touched
 }

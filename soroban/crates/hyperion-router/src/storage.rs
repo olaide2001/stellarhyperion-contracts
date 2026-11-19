@@ -2,7 +2,8 @@ use hyperion_core::{FlowWindow, HyperionError, RouteKind};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 use crate::types::{
-    ClaimProvenance, Config, PendingClaim, QueuedAction, RouteConfig, TokenConfig, TransferRecord,
+    ClaimProvenance, Config, MigrationStatus, PendingClaim, QueuedAction, RouteConfig, TokenConfig,
+    TransferRecord, LEGACY_SCHEMA_VERSION,
 };
 
 /// Ledgers of headroom below which the router tops a key's lifetime back up.
@@ -15,7 +16,7 @@ pub const BUMP_THRESHOLD: u32 = 17_280; // about a day
 pub const BUMP_TO: u32 = 518_400; // about thirty days
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Config,
     LiabilityTracking,
@@ -46,6 +47,11 @@ pub enum DataKey {
     ClaimSeq,
     Queued(u64),
     QueueSeq,
+    /// Explicit storage schema version for upgrades and migrations (#46).
+    SchemaVersion,
+    /// Action lifecycle audit metadata (#44).
+    ResolvedAction(u64),
+    MigrationState,
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -299,9 +305,7 @@ pub fn set_transfer(env: &Env, record: &TransferRecord) {
 /// Persistent rather than temporary on purpose. A temporary entry that archives is a replay
 /// window, and a replay window on a bridge is a mint-twice bug.
 pub fn is_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
-    env.storage()
-        .persistent()
-        .has(&DataKey::Processed(route, message_id.clone()))
+    touch_persistent_key(env, &DataKey::Processed(route, message_id.clone()))
 }
 
 pub fn mark_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) {
@@ -347,6 +351,17 @@ pub fn set_claim(env: &Env, record: &PendingClaim) {
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn migration_state(env: &Env) -> Option<MigrationStatus> {
+    env.storage().instance().get(&DataKey::MigrationState)
+}
+
+pub fn set_migration_state(env: &Env, status: &MigrationStatus) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MigrationState, status);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn claim_provenance(env: &Env, id: u64) -> Option<ClaimProvenance> {
@@ -409,4 +424,50 @@ pub fn touch_flow(env: &Env, token: &Address, route: RouteKind) {
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
     }
+}
+
+/// Extend TTL on a persistent key if it currently exists in active storage.
+pub fn touch_persistent_key(env: &Env, key: &DataKey) -> bool {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn schema_version(env: &Env) -> u32 {
+    if let Some(v) = env.storage().instance().get(&DataKey::SchemaVersion) {
+        v
+    } else if is_initialized(env) {
+        LEGACY_SCHEMA_VERSION
+    } else {
+        0
+    }
+}
+
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
+}
+
+pub fn retain_action(env: &Env, action: &QueuedAction) {
+    let key = DataKey::ResolvedAction(action.id);
+    env.storage().persistent().set(&key, action);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn action_payload(env: &Env, id: u64) -> Option<QueuedAction> {
+    let key = if env.storage().persistent().has(&DataKey::Queued(id)) {
+        DataKey::Queued(id)
+    } else {
+        DataKey::ResolvedAction(id)
+    };
+    touch_persistent_key(env, &key);
+    env.storage().persistent().get(&key)
 }

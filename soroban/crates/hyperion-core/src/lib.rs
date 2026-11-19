@@ -14,6 +14,7 @@ pub mod codec;
 pub mod error;
 pub mod flow;
 pub mod inbound;
+pub mod maintenance;
 pub mod route;
 pub mod strkey;
 
@@ -27,6 +28,10 @@ pub use cctp::{BurnMessage, CctpMessage, HyperionHook};
 pub use error::HyperionError;
 pub use flow::FlowWindow;
 pub use inbound::{Origin, Recipient, Router, RouterClient};
+pub use maintenance::{
+    AdapterKeyCoverage, AdapterMaintenance, AdapterMaintenanceClient, MaintenanceSummary,
+    MAX_MAINTENANCE_BATCH,
+};
 pub use route::RouteKind;
 pub use strkey::StrkeyDestination;
 

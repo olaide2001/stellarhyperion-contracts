@@ -59,13 +59,13 @@ use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm, evm_to_bytes32},
     axelar::{InboundNote, OutboundNote},
     inbound::{Origin, Recipient, RouterClient},
-    HyperionError, RouteKind,
+    AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, MAX_MAINTENANCE_BATCH,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractimpl, token, vec,
     xdr::ToXdr,
-    Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 use rail::{InterchainTokenServiceClient, Token, TokenManagerType};
@@ -493,8 +493,75 @@ impl AxelarAdapter {
         env.storage()
             .instance()
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
-        storage::touch_link(&env, &chain);
+        let _ = storage::touch_link(&env, &chain);
         Ok(())
+    }
+
+    /// Bounded storage maintenance for Axelar peer trust (`Link`, `Source`) and token mappings
+    /// (`TokenId`, `Token`).
+    pub fn maintain_storage(
+        env: Env,
+        tokens: Vec<Address>,
+        peer_chains: Vec<String>,
+        peer_domains: Vec<u32>,
+        remote_tokens: Vec<BytesN<32>>,
+        inbound_messages: Vec<BytesN<32>>,
+    ) -> Result<MaintenanceSummary, HyperionError> {
+        let _ = storage::config(&env)?;
+        if tokens.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains.len() > MAX_MAINTENANCE_BATCH
+            || peer_domains.len() > MAX_MAINTENANCE_BATCH
+            || remote_tokens.len() > MAX_MAINTENANCE_BATCH
+            || inbound_messages.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_add(tokens.len())
+                .saturating_add(remote_tokens.len())
+                .saturating_mul(2)
+                > MAX_MAINTENANCE_BATCH
+            || !peer_domains.is_empty()
+            || !inbound_messages.is_empty()
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+
+        let mut peer_trust_touched = 0u32;
+        for chain in peer_chains.iter() {
+            peer_trust_touched += storage::touch_link(&env, &chain);
+        }
+
+        let mut token_mappings_touched = 0u32;
+        for token in tokens.iter() {
+            token_mappings_touched += storage::touch_token(&env, &token);
+        }
+        for token_id in remote_tokens.iter() {
+            token_mappings_touched += storage::touch_remote_token(&env, &token_id);
+        }
+
+        Ok(MaintenanceSummary {
+            instance_extended: true,
+            token_mappings_touched,
+            peer_trust_touched,
+            inbound_records_touched: 0,
+            total_keys_touched: peer_trust_touched + token_mappings_touched,
+        })
+    }
+
+    /// Explicit key coverage for Axelar adapter storage maintenance.
+    pub fn key_coverage(env: Env) -> Result<AdapterKeyCoverage, HyperionError> {
+        let cfg = storage::config(&env)?;
+        Ok(AdapterKeyCoverage {
+            route: cfg.route,
+            has_token_mappings: true,
+            has_peer_trust: true,
+            has_inbound_records: false,
+            token_mapping_keys: 2,
+            peer_trust_keys: 2,
+            inbound_record_keys: 0,
+        })
     }
 
     // ---------------------------------------------------------------------------------------

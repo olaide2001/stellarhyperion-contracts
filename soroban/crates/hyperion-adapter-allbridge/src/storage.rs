@@ -92,12 +92,58 @@ pub fn set_asset(env: &Env, link: &AssetLink) {
 }
 
 /// Push a lane's expiry out without changing it. No-op when there is no such lane.
-pub fn touch_lane(env: &Env, chain: &String) {
+pub fn touch_lane(env: &Env, chain: &String) -> u32 {
     let key = DataKey::Lane(chain.clone());
+    let Some(lane) = env.storage().persistent().get::<_, ChainLane>(&key) else {
+        return 0;
+    };
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    let mut touched = 1u32;
+    let chain_key = DataKey::Chain(lane.allbridge_chain_id);
+    if env.storage().persistent().has(&chain_key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&chain_key, BUMP_THRESHOLD, BUMP_TO);
+        touched += 1;
+    }
+    touched
+}
+
+pub fn touch_chain_id(env: &Env, allbridge_chain_id: u32) -> bool {
+    let key = DataKey::Chain(allbridge_chain_id);
     if env.storage().persistent().has(&key) {
         env.storage()
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn touch_asset(env: &Env, token: &Address, allbridge_chain_id: u32) -> bool {
+    let key = DataKey::Asset(token.clone(), allbridge_chain_id);
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn touch_processed(env: &Env, message_id: &BytesN<32>) -> bool {
+    let key = DataKey::Processed(message_id.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
     }
 }
 

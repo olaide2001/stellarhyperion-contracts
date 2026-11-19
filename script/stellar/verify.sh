@@ -100,6 +100,36 @@ else
   check "token flow limit" "$(tfield flow_limit)" "$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=d.networks[process.argv[2]].tokens;process.stdout.write(t[Object.keys(t)[0]].flowLimit)' "$RECORD" "$CHAIN_KEY")"
 fi
 
+note "storage schema and registered adapter coverage"
+if MIG_STATUS=$(read_only "$ROUTER" get_migration_status); then
+  SCHEMA_VER=$(printf '%s' "$MIG_STATUS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const n=JSON.parse(s).current_version;if(!Number.isInteger(n)||n<0||n>2)process.exit(1);process.stdout.write(String(n))})')
+  check "schema version" "$SCHEMA_VER" "2"
+  mig_pending=$(printf '%s' "$MIG_STATUS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);if(typeof o.migration_pending!=="boolean")process.exit(1);process.stdout.write(String(o.migration_pending))})')
+  check "migration pending" "$mig_pending" "false"
+  for slug in cctp axelar-its; do
+    route=$([ "$slug" = "cctp" ] && echo "$ROUTE_CCTP" || echo "$ROUTE_AXELAR_ITS")
+    if registered=$(read_only "$ROUTER" get_adapter --route "$route"); then
+      registered=$(printf '%s' "$registered" | tr -d '"[:space:]')
+    else
+      say "$slug registered adapter unavailable"
+      problems=$((problems + 1))
+      continue
+    fi
+    if cov=$(read_only "$registered" key_coverage); then
+      coverage=$(printf '%s' "$cov" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);if(typeof o.has_token_mappings!=="boolean"||typeof o.has_peer_trust!=="boolean")process.exit(1);process.stdout.write(String(o.has_token_mappings&&o.has_peer_trust))})')
+      check "$slug actual coverage" "$coverage" "true"
+    else
+      say "$slug registered adapter coverage unavailable; upgrade and verify that adapter"
+      problems=$((problems + 1))
+    fi
+  done
+else
+  say "schema view unavailable; this does not prove legacy v1 or safe migration completion"
+  say "verify legacy executable provenance, then perform a reviewed upgrade and migration"
+  problems=$((problems + 1))
+fi
+say "Archived footprint planning: node script/stellar/restore-plan.mjs RPC_URL recorded-request.json"
+
 printf '\n'
 if [ "$problems" -eq 0 ]; then
   printf '\033[32mEverything on chain matches the record.\033[0m\n'

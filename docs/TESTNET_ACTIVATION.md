@@ -103,3 +103,118 @@ again. Proposal delays report the current live timelock delay, including when pr
 change to that delay. All desired router and adapter code hashes are mandatory; the canonical
 `adapter-axelar` record supplies the `axelar-its` hash. Numerical JSON amounts above JavaScript's
 safe range must be decimal strings, and contract-width limits are checked before output.
+
+## Storage upkeep, restoration planning, schema migration, and action audit
+
+### Archived storage restoration planner (#47)
+
+Restoration is planned off chain. A Soroban guest cannot prove archival from key presence:
+allocating a sequence number does not prove a record still exists or is archived. Guest reads of archived entries may reject or restore during
+simulation; an archived instance cannot run a guest planner at all. No guest API guesses archive
+state. The RPC planner works even when the instance/code itself needs restoration.
+
+Use the RPC planner before upkeep, migration, or settlement:
+
+```sh
+node script/stellar/restore-plan.mjs https://soroban-testnet.stellar.org recorded-request.json
+```
+
+The request contains `keys` (1–32 canonical base64 `LedgerKey` XDR values from a recorded
+footprint) and `transaction` (the original invocation envelope XDR). The planner only calls
+`simulateTransaction` and `getLedgerEntries`. It signs and submits nothing. It proves archival
+only from `restorePreamble` or CAP-0066 read-write archive indices in transaction data, reports active keys from their ledger TTL, reports a missing key
+only when a successful matching simulation touched it without a restore request, and otherwise
+reports unknown. For manual restoration it emits the exact complete restore footprint, including required code or
+instance dependencies, the original Soroban transaction data XDR and the exact decimal resource
+fee. CAP-0066 automatic restoration emits its exact indexed keys and original transaction data,
+without fabricating a separate restore operation. Footprints over 32 keys are refused. Review the footprint, restore it, then re-simulate the
+original invocation; fee and ledger evidence are estimates for that simulation, not a submission
+guarantee. No recipient is inferred from a key, claim number, caller, or supplied metadata.
+
+The local archived-claim snapshot fixture expires a genuine persistent ledger entry, applies a
+TTL-only restoration to that recorded entry, reloads its unchanged payload, and settles to the
+recorded recipient exactly once. This fixture models the ledger restoration operation; it does
+not claim to submit a live network restore transaction.
+
+### Versioned storage schema migration (#46)
+
+`get_migration_status.current_version` reports 2 for new/migrated routers, implicit 1 for initialized legacy
+storage, and 0 for an uninitialized router. Financial record layouts and all amount/recipient
+fields are unchanged. Version 2 adds a fixed migration state. Record version is determined from
+its family cursor and captured high-water mark: migrated IDs and new IDs above the captured
+mark use the target version; remaining legacy IDs use the current version. These cursor values
+are metadata, not proof that a missing record exists. This avoids an independently expiring
+schema sidecar and an unbounded map in instance storage.
+
+After the ordinary reviewed WASM upgrade, queue and execute `BeginStorageMigration(2)` through
+the existing admin timelock. This captures fixed transfer/claim high-water marks and authorizes
+bounded work. `migrate_storage(admin, 2, max_steps)` accepts 1–32 steps only after that delayed
+authorization. It decodes and rewrites each old typed record exactly and commits its version cursor atomically. Missing or archived records must be restored first: they never
+advance the cursor. Readers support old and new records while interrupted, new deliveries do
+not change captured totals, repeated authorization never resets progress, and calls after
+completion return the same completed status. This migration never guesses a balance or changes
+a payout, fee, flow window, recipient, or replay identifier. Future layout changes need a new
+reviewed version and conversion, rather than treating this v2 conversion as a generic migration.
+
+### Timelock cancellation reasons and action audit metadata (#44)
+
+Soroban `cancel_action_with_reason` and gated EVM `cancelActionWithReason` accept the six
+structured reason codes and at most 128 **printable ASCII bytes (0x20–0x7e)**. Unicode, control
+characters and oversized notes reject before any queue mutation. Legacy cancellation signatures
+remain and use an empty note with `Unspecified`.
+
+Existing queue/execution/cancellation events keep their original encoding. New Soroban audit
+and migration events, and EVM audit events, explicitly carry schema version 1.
+Soroban retains the original `QueuedAction` payload and schedule in `ResolvedAction` storage and
+exposes `get_action_payload`; cancelled actions leave the executable
+queue. Versioned immutable audit events record the actor for each transition. A pre-audit
+queuing author remains unknown; the cancellation event identifies only its resolver. EVM retains
+the canonical `queuedAction` payload and schedule after cancellation, exposes `actionCancelled`,
+and records versioned lifecycle metadata (actor, status, reason and note) in
+`ActionAuditUpdated` events. These immutable events are the EVM audit source; there is no second
+copy of the dynamic action or note in storage. Consumers combine the retained payload with the
+versioned events. Execution and recancellation both reject cancelled actions.
+
+### Adapter upkeep bounds, coverage and exclusions (#49)
+
+Every adapter exposes `key_coverage`. Verification reads the actual registered
+adapter and queries its own coverage. Upkeep permits at most 32 persistent key visits in total
+(excluding the single instance/instance extension), with conservative duplicate counting and
+Cartesian products included. Every input vector is separately bounded; unused families reject
+non-empty inputs instead of silently pretending to maintain them. TTL maintenance changes no
+mapping values or administration and requires no admin authorization.
+
+| Adapter   | Maintained persistent key families                                                                                                                                                      | Exclusions                                                                                                           |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| CCTP      | Domain/Chain/Caller peers; Asset(domain, remote token)                                                                                                                                  | Rail-owned nonce state; local token lists and inbound-message lists are unsupported                                  |
+| Axelar    | Link/Source peers; TokenId/Token forward and reverse mappings                                                                                                                           | ITS-owned replay/manager state; numeric domains and inbound-message lists are unsupported                            |
+| Allbridge | Lane/Chain peers; Asset(token, chain); Processed(message)                                                                                                                               | Remote-token list unsupported; gated inbound support remains unchanged                                               |
+| Router    | Bounded `keep_alive`: route/token configuration, route limits/windows, claim/transfer payloads; existing `was_processed` and the new action view extend the supplied replay/action keys | Call each registered adapter directly for upkeep and `key_coverage`; verification reads the registered address first |
+
+The Soroban contract spec embeds public Rust documentation in the WASM. Public API documentation
+uses concise, complete summaries; full explanations remain in ordinary source comments and this
+runbook. Guest exports, parameter/result types, event layouts and runtime behavior are preserved.
+The same pinned Stellar CLI builds these artifacts locally and in CI under the unchanged 65,536-byte
+ledger gate.
+
+The EVM compiler uses 1,000 optimizer runs to retain EIP-170 deployment headroom; the same profile
+is used locally and by full CI, with exact gas reports. The deployment size gates are unchanged.
+
+The adapter instance carries configuration, gas settings and the Allbridge validator; extending
+it preserves those fields together. External rail contracts need their own restoration/upkeep
+and are never implicitly maintained by these entrypoints. Expiration fixtures for all three
+adapters verify maintained peer mappings remain usable past their previous expiry with the same
+values and admin.
+
+### Compatibility, migration, and rail gating
+
+The active deployment remains **Stellar Testnet outbound ITS/CCTP**. All previous `AdminAction`
+variants, error numbers, rail/message formats, `ActionCancelled` events, `keep_alive` and legacy
+cancellation signatures remain. `BeginStorageMigration` is an appended Soroban-only variant.
+The read-only proposal tool does not generate upgrades or migrations automatically. Verification
+requires readable v2 schema/migration/actual-adapter views; unavailable RPC views never silently
+prove legacy v1 or completed migration. ABI artifacts
+for the additive EVM audit API are regenerated from Forge output. No deployment record changes
+and no live activation occur here. EVM, mainnet and non-active rails remain gated pending their
+independent acceptance validation. Adapter upgrade authority remains its existing admin; the
+router's reviewed timelock does not silently grant control over external adapter admins.

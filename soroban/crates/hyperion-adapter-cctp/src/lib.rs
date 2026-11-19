@@ -50,11 +50,12 @@ use hyperion_core::{
     cctp::{self, BurnMessage, CctpMessage, HyperionHook},
     codec,
     inbound::{Origin, Recipient, RouterClient},
-    HyperionError, RouteKind, BPS_DENOMINATOR,
+    AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, BPS_DENOMINATOR,
+    MAX_MAINTENANCE_BATCH,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 use rail::{MessageTransmitterClient, TokenMessengerClient};
@@ -420,8 +421,78 @@ impl CctpAdapter {
         env.storage()
             .instance()
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
-        storage::touch_link(&env, domain);
+        let _ = storage::touch_link(&env, domain);
         Ok(())
+    }
+
+    /// Bounded storage maintenance for CCTP peer trust (`Domain`, `Chain`, `Caller`) and
+    /// token mappings (`Asset(domain, remote_token)`).
+    pub fn maintain_storage(
+        env: Env,
+        tokens: Vec<Address>,
+        peer_chains: Vec<String>,
+        peer_domains: Vec<u32>,
+        remote_tokens: Vec<BytesN<32>>,
+        inbound_messages: Vec<BytesN<32>>,
+    ) -> Result<MaintenanceSummary, HyperionError> {
+        let _ = storage::config(&env)?;
+        if tokens.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains.len() > MAX_MAINTENANCE_BATCH
+            || peer_domains.len() > MAX_MAINTENANCE_BATCH
+            || remote_tokens.len() > MAX_MAINTENANCE_BATCH
+            || inbound_messages.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_add(peer_domains.len())
+                .saturating_mul(3)
+                .saturating_add(peer_domains.len().saturating_mul(remote_tokens.len()))
+                > MAX_MAINTENANCE_BATCH
+            || !tokens.is_empty()
+            || !inbound_messages.is_empty()
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+
+        let mut peer_trust_touched = 0u32;
+        for chain in peer_chains.iter() {
+            peer_trust_touched += storage::touch_link_by_chain(&env, &chain);
+        }
+        for domain in peer_domains.iter() {
+            peer_trust_touched += storage::touch_link(&env, domain);
+        }
+
+        let mut token_mappings_touched = 0u32;
+        for domain in peer_domains.iter() {
+            for burn_token in remote_tokens.iter() {
+                if storage::touch_asset(&env, domain, &burn_token) {
+                    token_mappings_touched += 1;
+                }
+            }
+        }
+
+        Ok(MaintenanceSummary {
+            instance_extended: true,
+            token_mappings_touched,
+            peer_trust_touched,
+            inbound_records_touched: 0,
+            total_keys_touched: peer_trust_touched + token_mappings_touched,
+        })
+    }
+
+    /// Explicit key coverage for CCTP adapter storage maintenance.
+    pub fn key_coverage(_env: Env) -> Result<AdapterKeyCoverage, HyperionError> {
+        Ok(AdapterKeyCoverage {
+            route: RouteKind::Cctp,
+            has_token_mappings: true,
+            has_peer_trust: true,
+            has_inbound_records: false,
+            token_mapping_keys: 1,
+            peer_trust_keys: 3,
+            inbound_record_keys: 0,
+        })
     }
 
     // ---------------------------------------------------------------------------------------

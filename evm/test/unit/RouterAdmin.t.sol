@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {Vm} from "forge-std/Vm.sol";
+
 import {IAccessControl} from "openzeppelin/access/IAccessControl.sol";
 import {Pausable} from "openzeppelin/utils/Pausable.sol";
 
@@ -21,7 +23,14 @@ import {
     ZeroAddress
 } from "../../src/HyperionErrors.sol";
 import {HyperionRouter} from "../../src/HyperionRouter.sol";
-import {ActionKind, AdminAction, QueuedAction, RouteKind, TokenConfig} from "../../src/HyperionTypes.sol";
+import {
+    ActionKind,
+    AdminAction,
+    CancelReason,
+    QueuedAction,
+    RouteKind,
+    TokenConfig
+} from "../../src/HyperionTypes.sol";
 import {IHyperionRouter} from "../../src/interfaces/IHyperionRouter.sol";
 import {Fixture} from "../Fixture.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -34,6 +43,43 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 /// executed twice, an action that matured in March and got run in November, a limit raise
 /// measured against a ceiling that moved while it waited.
 contract RouterAdminTest is Fixture {
+    function test_cancellation_preserves_payload_and_non_executable_status() public {
+        AdminAction memory action = _empty(ActionKind.SetFeeBps);
+        action.amount = 22;
+        vm.prank(admin);
+        uint64 id = router.queueAction(action);
+        vm.recordLogs();
+        vm.prank(guardian);
+        router.cancelActionWithReason(id, CancelReason.SecurityConcern, "review required");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (uint32 version, CancelReason reason, string memory note) =
+            abi.decode(logs[logs.length - 1].data, (uint32, CancelReason, string));
+        assertEq(version, 1);
+        assertEq(uint256(reason), uint256(CancelReason.SecurityConcern));
+        assertEq(note, "review required");
+        assertTrue(router.actionCancelled(id));
+        assertEq(keccak256(abi.encode(router.queuedAction(id).action)), keccak256(abi.encode(action)));
+        vm.warp(block.timestamp + TIMELOCK);
+        vm.expectRevert(TimelockNotQueued.selector);
+        vm.prank(admin);
+        router.executeAction(id);
+    }
+
+    function test_cancellation_rejects_control_and_non_ascii_text_without_dropping_action() public {
+        AdminAction memory action = _empty(ActionKind.SetFeeBps);
+        action.amount = 22;
+        vm.prank(admin);
+        uint64 id = router.queueAction(action);
+        string[3] memory unsafeNotes = [string("bad\nline"), string(unicode"é"), string(new bytes(129))];
+        for (uint256 i; i < unsafeNotes.length; ++i) {
+            vm.expectRevert(InvalidLimit.selector);
+            vm.prank(guardian);
+            router.cancelActionWithReason(id, CancelReason.SecurityConcern, unsafeNotes[i]);
+            assertEq(router.queuedAction(id).id, id);
+            assertFalse(router.actionCancelled(id));
+        }
+    }
+
     // -------------------------------------------------------------------------------------
     // Deployment
     // -------------------------------------------------------------------------------------
@@ -293,7 +339,9 @@ contract RouterAdminTest is Fixture {
         vm.prank(guardian);
         router.cancelAction(id);
 
-        assertEq(router.queuedAction(id).id, 0, "the slot is gone");
+        assertEq(router.queuedAction(id).id, id, "the audit payload is retained");
+        assertTrue(router.actionCancelled(id));
+        assertEq(router.queuedAction(id).action.subject, stranger);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
         vm.prank(admin);
@@ -310,7 +358,12 @@ contract RouterAdminTest is Fixture {
 
         vm.prank(admin);
         router.cancelAction(id);
-        assertEq(router.queuedAction(id).id, 0);
+        assertEq(router.queuedAction(id).id, id);
+        assertTrue(router.actionCancelled(id));
+        assertEq(router.queuedAction(id).action.amount, 20);
+        vm.expectRevert(TimelockNotQueued.selector);
+        vm.prank(admin);
+        router.cancelAction(id);
     }
 
     function test_a_stranger_cannot_cancel() public {
