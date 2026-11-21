@@ -28,7 +28,7 @@ refuse_config() {
   if cast call "$cctp" 'setLane(string,uint32,bytes32)' ownership-check 27 "$recipient" --from "$sender" --rpc-url "$RPC" >/dev/null 2>&1; then
     echo 'unauthorized CCTP configuration accepted' >&2; exit 1
   fi
-  if cast call "$axelar" 'setPeer(string,string,bytes)' ownership-check stellar "$recipient" --from "$sender" --rpc-url "$RPC" >/dev/null 2>&1; then
+  if cast call "$axelar" 'setPeer(string,string,bytes)' ownership-check ownership-check-axelar "$recipient" --from "$sender" --rpc-url "$RPC" >/dev/null 2>&1; then
     echo 'unauthorized ITS configuration accepted' >&2; exit 1
   fi
 }
@@ -52,7 +52,7 @@ handover report "$previous"
 refuse_config "$previous"
 
 cast send "$cctp" 'setLane(string,uint32,bytes32)' ownership-check 27 "$recipient" --rpc-url "$RPC" --unlocked --from "$next" >/dev/null
-cast send "$axelar" 'setPeer(string,string,bytes)' ownership-check stellar "$recipient" --rpc-url "$RPC" --unlocked --from "$next" >/dev/null
+cast send "$axelar" 'setPeer(string,string,bytes)' ownership-check ownership-check-axelar "$recipient" --rpc-url "$RPC" --unlocked --from "$next" >/dev/null
 
 node --input-type=module - "$chain" "$previous" "$next" <<'JS'
 import fs from 'node:fs';
